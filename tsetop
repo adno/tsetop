@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+
+import sys                          # for sys.exit()
+import argparse                     # needs to be installed for python <2.7
+import signal
+from setop import *
+
+"""
+TODO doc string
+
+We define Set and Counted Set....
+
+"""
+
+# TODO encapsulate the program in a function (functions), change global to nonlocal (agg etc.)
+
+# TODO works in text mode 'r', 'w' (not 'rb', 'wb'), what about encodings?
+# TODO do not keeps both files in memory? (lazy)
+# TODO union etc. of multiple files
+
+# TODO list (by priority)
+#
+# fields for B files
+# aggregate for B files
+# fix the set classes, support set operations and more than 1 B file
+# output format - like join + strings, concat, aggragation like operations
+# aggregation - like output format?
+# -a F (file number)
+# -a F.n (file n., file n)
+# -a F.n:format (list of fields, * for fields except "join")
+# other TODOs
+
+
+class ConcatAction(argparse.Action):
+    def __init__(self, option_strings, dest, nargs=None, **kwargs):
+        super(ConcatAction, self).__init__(option_strings, dest, nargs=nargs, **kwargs)
+    def __call__(self, parser, namespace, values, option_string=None):
+        destination = getattr(namespace, self.dest)
+        destination += values
+
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # Instead of throwing an exception revert SIGPIPE to default behavior (terminate)
+
+
+
+
+parser = argparse.ArgumentParser(
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    description='Performs set operation on text files or tab-separated columns thereof\n'
+    'preserving order of original files.\n',
+
+    epilog='Lines in each file must be unique unless the --multiset or --aggregate\n'
+    'option is supplied.\n'
+    'If the second input file is not supplied, reads from standard input.\n'
+    'If the output file is not supplied, writes to standard output.\n'
+    'Empty lines are NOT ignored. Trailing new line is silently added if missing.\n'
+    '\n'
+    'Exit status 0 on success.\n'
+    'Exit status 1 if the uniqueness test fails, 2 on parameter error.'
+    )
+
+group = parser.add_mutually_exclusive_group()
+group.add_argument('-m', '--multiset',
+                    help='interpret both files as multisets.', action='store_true')
+group.add_argument('--assume-unique',
+                    help='do not check that lines in input files are unique (i.e. files '
+                        'are not multisets) before proceeding (DANGEROUS, may produce undefined results for non-conforming input)', action='store_true')
+group.add_argument('-a', '--aggregate',
+                    help='aggregate 2nd to last field of lines by the 1st field',   # TODO TODO applied only to the first file, how to specify file by file
+                    metavar='<method>', choices=['count','list','count-list','count-count-list'],)
+parser.add_argument('-f', '--fields', metavar='<n>', type=int, nargs='+',
+                         help='test equality on <n>-th field; multiple values are sequentially applied to input files; '
+                         '0 (default) means the whole line (ONLY for intersection and difference)',
+                         default=[], action=ConcatAction
+                            )
+parser.add_argument('-t', '--field-separator', metavar='<sep>',
+                    help='use <sep> as the field separators instead of the tab character',
+                    default='\t')
+
+actiongroup = parser.add_mutually_exclusive_group() # TODO was required
+actiongroup.add_argument('-I', '--intersection',
+                         help='perform intersection A /\ B [ /\ ...]',
+                         action='store_true')
+actiongroup.add_argument('-L', '--left-intersection',
+                         help='perform intersection, include rest of the first file: A \/ (A /\ B [ /\ ...])',  # TODO TODO
+                         action='store_true')
+actiongroup.add_argument('-U', '--union',
+                         help='perform union A \/ B [ \/ ...]',
+                         action='store_true')
+actiongroup.add_argument('-D', '--difference',
+                         help='perform difference (complement) A-B',    action='store_true')
+actiongroup.add_argument('-S', '--symmetric-difference',
+                         help='perform symmetric difference (A-B)\/(B-A)',
+                         action='store_true')
+
+parser.add_argument('-o', '--output',  metavar='<outfile>', type=argparse.FileType('w'),
+                        help='write output to <outfile> instead of stdout',
+                        default=sys.stdout)
+parser.add_argument('input_files', metavar='<infile>', nargs='*', type=argparse.FileType('r'),
+                        help='input file: one for each set, stdin is assumed for a single missing input file; alternatively stdin may be represented as \'-\'',
+                        default=[sys.stdin])
+
+
+args        = parser.parse_args()
+no_setop    = False
+file_A      = None
+files_B     = []
+
+
+if args.intersection or args.union or args.difference or args.symmetric_difference:
+    if len(args.input_files) == 1 and len(args.input_files) != sys.stdin:
+        args.input_files.append(sys.stdin)
+    elif len(args.input_files) < 2:
+        sys.stderr.write('tsetop: Error: No input file specified. All operations require at least one.\n'
+                         '        (If only one is specified stdin is assumed as the second input file.)\n')
+        sys.exit(2)
+    elif (args.difference or args.symmetric_difference) and len(args.input_files) > 2:
+        sys.stderr.write('tsetop: Error: More than two input files were specified for the %s operation.\n' %
+                         ('difference' if args.difference else 'symmetric difference') )
+        sys.exit(2)
+    files_B = args.input_files[1:]
+else:
+    no_setop = True
+    if len(args.input_files) != 1:
+        sys.stderr.write('tsetop: Error: No operation, but more than one input files was specified.\n')
+        sys.exit(2)
+
+file_A = args.input_files[0]
+        
+assert file_A != None
+        
+field_indices = []
+
+n_fields_missing = len(args.input_files) - len(args.fields)
+
+if args.fields != []:
+    if not (args.intersection or args.difference):
+        sys.stderr.write('tsetop: Error: Argument -f/--fields supplied for operation other than intersection or difference.\n')
+        sys.exit(2)
+    if n_fields_missing < 0:
+        sys.stderr.write('tsetop: Error: More field numbers supplied via -f/--fields (%i) than input files (%i).\n'%(
+            len(args.fields), len(args.input_files)
+            ))
+        sys.exit(2)
+    for fn in args.fields:
+        if fn < 0:
+            sys.stderr.write('tsetop: Error: Value less than 0 supplied via -f/--fields.\n')
+            sys.exit(2)
+        if fn == 0:
+            field_indices.append(None)
+        else:
+            field_indices.append(fn-1)         # indices start from 0
+
+field_indices += n_fields_missing * [None]     # TODO check if used REALLY just for intersection and difference
+
+# TODO TODO we ignore fields for other than file A
+
+if len(args.field_separator) == 0:
+    sys.stderr.write('tsetop: Error: Argument -t/--field-separator must be non-empty string.\n')
+    sys.exit(2)
+
+# items of A and B for sequential access (to preserve order on output)
+files   = args.input_files
+# f_items = []
+# for file in files:
+#     with file as f:
+#         f_items.append( f.read().splitlines() )
+        
+af = files[0]
+bfs = files[1:]
+
+op = (
+        SetIntersection         if args.intersection    else
+        SetUnion                if args.union           else
+        SetDifference           if args.difference      else
+        SetSymmetricDifference  if args.symmetric_difference else
+        None
+        )
+assert op is not None
+c = af
+for bf in bfs:
+    c = op(c, bf, args.multiset)
+
+for x in c:
+    sys.stdout.write(x)
